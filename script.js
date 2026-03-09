@@ -1,57 +1,42 @@
 // ==UserScript==
-// @name         NotebookLM Project Categorizer
+// @name         NotebookLM Project Categorizer Pro
 // @namespace    https://github.com/muharamdani
-// @version      1.4.0
-// @description  Adds category filter buttons to the NotebookLM project list based on project titles. Handles SPA navigation. Includes category import/export and inline category editor.
-// @author       muharamdani
+// @version      2.0.1
+// @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, and export with save picker when available.
+// @author       muharamdani + ChatGPT
 // @match        https://notebooklm.google.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.co
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_log
+// @grant        GM_download
 // @require      https://cdn.jsdelivr.net/npm/arrive@2.4.1/minified/arrive.min.js
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    const DEFAULT_CATEGORIES = {
-        'All': [],
-        'Tutorial': ['How to', 'Course', 'Lecture', 'Tutorial'],
-        'Finance': ['Investing', 'Gold', 'Stocks', 'Bonds', 'Funds'],
-        'Other': []
+    const DEFAULT_CATEGORY_ORDER = ['All', 'Tutorial', 'Finance', 'Other'];
+
+    const DEFAULT_CATEGORY_RULES = {
+        All: { matcher: 'keyword', patterns: [] },
+        Tutorial: { matcher: 'keyword', patterns: ['How to', 'Course', 'Lecture', 'Tutorial'] },
+        Finance: { matcher: 'keyword', patterns: ['Investing', 'Gold', 'Stocks', 'Bonds', 'Funds'] },
+        Other: { matcher: 'keyword', patterns: [] }
     };
 
-    const ACTIVE_FILTER_KEY = 'notebooklm_active_filter';
-    const CATEGORIES_KEY = 'notebooklm_categories';
+    const STORAGE_KEYS = {
+        activeFilter: 'notebooklm_active_filter',
+        config: 'notebooklm_category_config_v2',
+        manualAssignments: 'notebooklm_manual_category_assignments_v1',
+        exportBundleName: 'notebooklm-categories-export'
+    };
 
-    function loadCategories() {
-        const saved = GM_getValue(CATEGORIES_KEY, null);
-        if (!saved || typeof saved !== 'object' || Array.isArray(saved)) {
-            return { ...DEFAULT_CATEGORIES };
-        }
+    const SPECIAL_CATEGORIES = new Set(['All', 'Other']);
 
-        const merged = {};
-        merged.All = Array.isArray(saved.All) ? saved.All : [];
-
-        Object.keys(saved).forEach(key => {
-            if (key !== 'All' && key !== 'Other') {
-                merged[key] = Array.isArray(saved[key]) ? saved[key] : [];
-            }
-        });
-
-        merged.Other = Array.isArray(saved.Other) ? saved.Other : [];
-        return merged;
-    }
-
-    function saveCategories(newCategories) {
-        GM_setValue(CATEGORIES_KEY, newCategories);
-        categories = loadCategories();
-        GM_log('Categories saved:', categories);
-    }
-
-    let categories = loadCategories();
+    let state = loadConfig();
+    let manualAssignments = loadManualAssignments();
 
     GM_addStyle(`
         .category-filter-container {
@@ -65,19 +50,24 @@
         }
 
         .category-filter-button,
-        .category-action-button {
-            padding: 8px 15px;
+        .category-action-button,
+        .nlm-btn,
+        .nlm-manual-select,
+        .nlm-mini-btn {
+            padding: 8px 14px;
             border: 1px solid #ccc;
             border-radius: 16px;
             background-color: #f8f8f8;
             color: #333;
             cursor: pointer;
             font-size: 0.9em;
-            transition: background-color 0.2s, color 0.2s, box-shadow 0.2s;
+            transition: background-color 0.2s, color 0.2s, box-shadow 0.2s, border-color 0.2s;
         }
 
         .category-filter-button:hover,
-        .category-action-button:hover {
+        .category-action-button:hover,
+        .nlm-btn:hover,
+        .nlm-mini-btn:hover {
             background-color: #eee;
             border-color: #bbb;
         }
@@ -114,7 +104,7 @@
         }
 
         .nlm-modal {
-            width: min(900px, 96vw);
+            width: min(1100px, 96vw);
             max-height: 90vh;
             overflow: auto;
             background: #fff;
@@ -126,28 +116,66 @@
         }
 
         .nlm-modal h2 {
-            margin: 0 0 16px 0;
+            margin: 0 0 10px 0;
             font-size: 1.3rem;
         }
 
         .nlm-modal p {
-            margin: 0 0 16px 0;
+            margin: 0 0 14px 0;
             color: #555;
+        }
+
+        .nlm-category-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
         }
 
         .nlm-category-row {
             display: grid;
-            grid-template-columns: 220px 1fr auto;
+            grid-template-columns: 40px 220px 140px 1fr auto;
             gap: 10px;
             align-items: start;
-            margin-bottom: 12px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid #eee;
+            padding: 12px;
+            border: 1px solid #eee;
+            border-radius: 12px;
+            background: #fafafa;
+        }
+
+        .nlm-category-row.dragging {
+            opacity: 0.55;
+        }
+
+        .nlm-category-row.drag-over {
+            border-color: #4285f4;
+            background: #f2f7ff;
+        }
+
+        .nlm-drag-handle {
+            user-select: none;
+            cursor: grab;
+            text-align: center;
+            padding-top: 10px;
+            font-size: 18px;
+            color: #666;
+        }
+
+        .nlm-drag-handle:active {
+            cursor: grabbing;
+        }
+
+        .nlm-field label {
+            display: block;
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 6px;
         }
 
         .nlm-category-row input[type="text"],
+        .nlm-category-row select,
         .nlm-category-row textarea,
-        .nlm-add-row input[type="text"] {
+        .nlm-add-row input[type="text"],
+        .nlm-add-row select {
             width: 100%;
             box-sizing: border-box;
             border: 1px solid #ccc;
@@ -165,7 +193,8 @@
         }
 
         .nlm-category-row.locked input,
-        .nlm-category-row.locked textarea {
+        .nlm-category-row.locked textarea,
+        .nlm-category-row.locked select {
             background: #f7f7f7;
         }
 
@@ -174,19 +203,6 @@
             gap: 10px;
             flex-wrap: wrap;
             margin-top: 18px;
-        }
-
-        .nlm-btn {
-            padding: 10px 14px;
-            border: 1px solid #ccc;
-            border-radius: 10px;
-            background: #f8f8f8;
-            cursor: pointer;
-            font-size: 14px;
-        }
-
-        .nlm-btn:hover {
-            background: #eee;
         }
 
         .nlm-btn.primary {
@@ -204,7 +220,7 @@
 
         .nlm-add-row {
             display: grid;
-            grid-template-columns: 220px 1fr auto;
+            grid-template-columns: 220px 140px 1fr auto;
             gap: 10px;
             align-items: center;
             margin-top: 18px;
@@ -217,48 +233,207 @@
             color: #666;
             margin-top: 4px;
         }
+
+        .nlm-project-tools {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 6px;
+            flex-wrap: wrap;
+        }
+
+        .nlm-manual-select {
+            padding: 4px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            min-width: 130px;
+            background: #fff;
+        }
+
+        .nlm-mini-btn {
+            padding: 4px 8px;
+            font-size: 12px;
+            border-radius: 10px;
+        }
+
+        .nlm-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 11px;
+            background: #eef4ff;
+            color: #2457b2;
+            border: 1px solid #cfe0ff;
+        }
     `);
 
+    function createDefaultState() {
+        return {
+            order: [...DEFAULT_CATEGORY_ORDER],
+            categories: deepClone(DEFAULT_CATEGORY_RULES)
+        };
+    }
+
+    function deepClone(obj) {
+        return JSON.parse(JSON.stringify(obj));
+    }
+
+    function normalizeCategoryRule(name, rule) {
+        const safeRule = rule && typeof rule === 'object' ? rule : {};
+        const matcher = safeRule.matcher === 'regex' ? 'regex' : 'keyword';
+        const patterns = Array.isArray(safeRule.patterns) ? safeRule.patterns.map(v => String(v)).filter(Boolean) : [];
+
+        if (name === 'All') {
+            return { matcher: 'keyword', patterns: [] };
+        }
+
+        return { matcher, patterns };
+    }
+
+    function normalizeConfig(raw) {
+        const fallback = createDefaultState();
+
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            return fallback;
+        }
+
+        const rawCategories = raw.categories && typeof raw.categories === 'object' && !Array.isArray(raw.categories)
+            ? raw.categories
+            : raw;
+
+        const names = new Set(Object.keys(rawCategories));
+
+        names.add('All');
+        names.add('Other');
+
+        let order = Array.isArray(raw.order) ? raw.order.map(String) : Object.keys(rawCategories);
+        order = order.filter(name => names.has(name));
+
+        if (!order.includes('All')) {
+            order.unshift('All');
+        } else {
+            order = order.filter(name => name !== 'All');
+            order.unshift('All');
+        }
+
+        order = order.filter(name => name !== 'Other');
+        order.push('Other');
+
+        const categories = {};
+        for (const name of order) {
+            categories[name] = normalizeCategoryRule(name, rawCategories[name]);
+        }
+
+        return { order, categories };
+    }
+
+    function loadConfig() {
+        const saved = GM_getValue(STORAGE_KEYS.config, null);
+        return normalizeConfig(saved);
+    }
+
+    function saveConfig(nextState) {
+        state = normalizeConfig(nextState);
+        GM_setValue(STORAGE_KEYS.config, state);
+        GM_log('Saved config:', state);
+    }
+
+    function loadManualAssignments() {
+        const saved = GM_getValue(STORAGE_KEYS.manualAssignments, null);
+        if (!saved || typeof saved !== 'object' || Array.isArray(saved)) {
+            return {};
+        }
+        return saved;
+    }
+
+    function saveManualAssignments(nextAssignments) {
+        manualAssignments = nextAssignments && typeof nextAssignments === 'object' ? nextAssignments : {};
+        GM_setValue(STORAGE_KEYS.manualAssignments, manualAssignments);
+        GM_log('Saved manual assignments:', manualAssignments);
+    }
+
+    function getCategoryNames() {
+        return [...state.order];
+    }
+
+    function isSpecialCategory(name) {
+        return SPECIAL_CATEGORIES.has(name);
+    }
+
+    function getProjectElements() {
+        return Array.from(document.querySelectorAll('project-button, tr.mat-mdc-row'));
+    }
+
+    function getTitleElement(projectElement) {
+        return projectElement.querySelector('.project-button-title, .project-table-title');
+    }
+
+    function getProjectTitle(projectElement) {
+        const titleElement = getTitleElement(projectElement);
+        return titleElement ? titleElement.textContent.trim() : '';
+    }
+
+    function getProjectKey(projectElement) {
+        const title = getProjectTitle(projectElement);
+        if (!title) return null;
+        return title.toLowerCase();
+    }
+
+    function safeRegexMatch(pattern, text) {
+        try {
+            const re = new RegExp(pattern, 'i');
+            return re.test(text);
+        } catch (err) {
+            return false;
+        }
+    }
+
+    function matchesCategoryRule(rule, title) {
+        if (!rule || !title) return false;
+        const text = title.toLowerCase().trim();
+
+        if (rule.matcher === 'regex') {
+            return (rule.patterns || []).some(pattern => safeRegexMatch(pattern, title));
+        }
+
+        return (rule.patterns || []).some(keyword => text.includes(String(keyword).toLowerCase()));
+    }
+
     function getProjectCategory(projectElement) {
-        const titleElement = projectElement.querySelector('.project-button-title, .project-table-title');
-        if (!titleElement) {
-            GM_log('No title found in project element:', projectElement);
+        const key = getProjectKey(projectElement);
+        const title = getProjectTitle(projectElement);
+
+        if (!title) {
             return 'Other';
         }
 
-        const title = titleElement.textContent.toLowerCase().trim();
+        if (key && manualAssignments[key] && state.categories[manualAssignments[key]]) {
+            return manualAssignments[key];
+        }
 
-        for (const categoryName in categories) {
+        for (const categoryName of state.order) {
             if (categoryName === 'All' || categoryName === 'Other') continue;
-
-            const keywords = categories[categoryName] || [];
-            for (const keyword of keywords) {
-                if (title.includes(String(keyword).toLowerCase())) {
-                    return categoryName;
-                }
+            if (matchesCategoryRule(state.categories[categoryName], title)) {
+                return categoryName;
             }
         }
 
-        if (categories['Other'] && categories['Other'].length > 0) {
-            for (const keyword of categories['Other']) {
-                if (title.includes(String(keyword).toLowerCase())) {
-                    return 'Other';
-                }
-            }
+        if (matchesCategoryRule(state.categories.Other, title)) {
+            return 'Other';
         }
 
         return 'Other';
     }
 
     function updateButtonCounts() {
-        const projectButtons = document.querySelectorAll('project-button, tr.mat-mdc-row');
+        const projectButtons = getProjectElements();
         const categoryCounts = {};
-
-        Object.keys(categories).forEach(cat => {
-            categoryCounts[cat] = 0;
-        });
-
-        categoryCounts['All'] = projectButtons.length;
+        for (const name of getCategoryNames()) {
+            categoryCounts[name] = 0;
+        }
+        categoryCounts.All = projectButtons.length;
 
         projectButtons.forEach(proj => {
             const category = getProjectCategory(proj);
@@ -276,11 +451,10 @@
     }
 
     function filterProjects(selectedCategory) {
-        const projectButtons = document.querySelectorAll('project-button, tr.mat-mdc-row');
-
-        projectButtons.forEach(proj => {
+        const safeCategory = state.categories[selectedCategory] ? selectedCategory : 'All';
+        getProjectElements().forEach(proj => {
             const projectCategory = getProjectCategory(proj);
-            if (selectedCategory === 'All' || projectCategory === selectedCategory) {
+            if (safeCategory === 'All' || projectCategory === safeCategory) {
                 proj.setAttribute('data-filtered', 'visible');
             } else {
                 proj.setAttribute('data-filtered', 'hidden');
@@ -288,65 +462,158 @@
         });
 
         document.querySelectorAll('.category-filter-button').forEach(btn => {
-            const btnCategory = btn.getAttribute('data-category');
-            btn.classList.toggle('active', btnCategory === selectedCategory);
+            btn.classList.toggle('active', btn.getAttribute('data-category') === safeCategory);
         });
 
-        GM_setValue(ACTIVE_FILTER_KEY, selectedCategory);
+        GM_setValue(STORAGE_KEYS.activeFilter, safeCategory);
+    }
+
+    function getSavedFilter() {
+        const saved = GM_getValue(STORAGE_KEYS.activeFilter, 'All');
+        return state.categories[saved] ? saved : 'All';
     }
 
     function rebuildUI() {
-        const existingContainer = document.querySelector('.category-filter-container');
-        if (existingContainer) existingContainer.remove();
+        const existing = document.querySelector('.category-filter-container');
+        if (existing) existing.remove();
 
         const targetContainer = document.querySelector('.project-buttons-flow, table.mdc-data-table__table');
         if (targetContainer) {
             createFilterUI(targetContainer);
         }
 
-        const savedFilter = GM_getValue(ACTIVE_FILTER_KEY, 'All');
-        const filterToApply = categories[savedFilter] !== undefined ? savedFilter : 'All';
-        filterProjects(filterToApply);
+        decorateProjects();
         updateButtonCounts();
+        filterProjects(getSavedFilter());
     }
 
-    function exportCategories() {
-        try {
-            const exportData = {
-                version: 1,
-                exportedAt: new Date().toISOString(),
-                categories: categories
-            };
-
-            const blob = new Blob([JSON.stringify(exportData, null, 2)], {
-                type: 'application/json'
-            });
-
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            const date = new Date().toISOString().slice(0, 10);
-            a.href = url;
-            a.download = `notebooklm-categories-${date}.json`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-        } catch (err) {
-            console.error('Export failed:', err);
-            alert('Errore durante l’esportazione delle categorie.');
-        }
+    function exportPayload() {
+        return {
+            version: 2,
+            exportedAt: new Date().toISOString(),
+            activeFilter: getSavedFilter(),
+            config: state,
+            manualAssignments
+        };
     }
 
-    function validateImportedCategories(obj) {
-        if (!obj || typeof obj !== 'object') return false;
-
-        const importedCategories = obj.categories ?? obj;
-        if (!importedCategories || typeof importedCategories !== 'object' || Array.isArray(importedCategories)) {
+    async function saveTextFileWithPicker(filename, content) {
+        if (typeof window.showSaveFilePicker !== 'function') {
             return false;
         }
 
-        for (const [key, value] of Object.entries(importedCategories)) {
-            if (typeof key !== 'string' || !Array.isArray(value)) {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName: filename,
+                types: [
+                    {
+                        description: 'JSON file',
+                        accept: {
+                            'application/json': ['.json']
+                        }
+                    }
+                ]
+            });
+
+            const writable = await handle.createWritable();
+            await writable.write(content);
+            await writable.close();
+            return true;
+        } catch (err) {
+            if (err && err.name === 'AbortError') {
+                return 'cancelled';
+            }
+            console.error('showSaveFilePicker failed:', err);
+            return false;
+        }
+    }
+
+    function gmDownloadWithSaveAs(filename, content) {
+        return new Promise((resolve) => {
+            if (typeof GM_download !== 'function') {
+                resolve(false);
+                return;
+            }
+
+            const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+
+            try {
+                GM_download({
+                    url,
+                    name: filename,
+                    saveAs: true,
+                    onload: () => {
+                        URL.revokeObjectURL(url);
+                        resolve(true);
+                    },
+                    onerror: (err) => {
+                        console.error('GM_download failed:', err);
+                        URL.revokeObjectURL(url);
+                        resolve(false);
+                    },
+                    ontimeout: () => {
+                        URL.revokeObjectURL(url);
+                        resolve(false);
+                    }
+                });
+            } catch (err) {
+                console.error('GM_download exception:', err);
+                URL.revokeObjectURL(url);
+                resolve(false);
+            }
+        });
+    }
+
+    function fallbackDownload(filename, content) {
+        const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function exportCategories() {
+        try {
+            const payload = exportPayload();
+            const content = JSON.stringify(payload, null, 2);
+            const filename = `${STORAGE_KEYS.exportBundleName}-${new Date().toISOString().slice(0, 10)}.json`;
+
+            const pickerResult = await saveTextFileWithPicker(filename, content);
+            if (pickerResult === true || pickerResult === 'cancelled') {
+                return;
+            }
+
+            const gmResult = await gmDownloadWithSaveAs(filename, content);
+            if (gmResult) {
+                return;
+            }
+
+            fallbackDownload(filename, content);
+        } catch (err) {
+            console.error('Export failed:', err);
+            alert('Errore durante l’esportazione.');
+        }
+    }
+
+    function validateImportedPayload(obj) {
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+
+        const config = obj.config || obj;
+        const categories = config.categories || config;
+
+        if (!categories || typeof categories !== 'object' || Array.isArray(categories)) return false;
+
+        for (const [key, rule] of Object.entries(categories)) {
+            if (typeof key !== 'string') return false;
+            if (rule && typeof rule === 'object' && !Array.isArray(rule)) {
+                if (rule.matcher !== undefined && !['keyword', 'regex'].includes(rule.matcher)) return false;
+                if (rule.patterns !== undefined && !Array.isArray(rule.patterns)) return false;
+            } else if (!Array.isArray(rule)) {
                 return false;
             }
         }
@@ -354,41 +621,43 @@
         return true;
     }
 
-    function normalizeImportedCategories(obj) {
-        const importedCategories = obj.categories ?? obj;
-        const normalized = {};
+    function normalizeImportedPayload(obj) {
+        const configCandidate = obj.config || obj;
+        const config = normalizeConfig(configCandidate);
 
-        normalized.All = Array.isArray(importedCategories.All) ? importedCategories.All : [];
+        const activeFilter = typeof obj.activeFilter === 'string' && config.categories[obj.activeFilter]
+            ? obj.activeFilter
+            : 'All';
 
-        Object.keys(importedCategories).forEach(key => {
-            if (key !== 'All' && key !== 'Other') {
-                normalized[key] = Array.isArray(importedCategories[key]) ? importedCategories[key] : [];
-            }
-        });
+        const assignments = obj.manualAssignments && typeof obj.manualAssignments === 'object' && !Array.isArray(obj.manualAssignments)
+            ? obj.manualAssignments
+            : {};
 
-        normalized.Other = Array.isArray(importedCategories.Other) ? importedCategories.Other : [];
-        return normalized;
+        return { config, activeFilter, manualAssignments: assignments };
     }
 
     function importCategoriesFromFile(file) {
         const reader = new FileReader();
 
-        reader.onload = function(event) {
+        reader.onload = event => {
             try {
                 const parsed = JSON.parse(event.target.result);
 
-                if (!validateImportedCategories(parsed)) {
-                    alert('File JSON non valido. Formato categorie non riconosciuto.');
+                if (!validateImportedPayload(parsed)) {
+                    alert('File JSON non valido o formato non riconosciuto.');
                     return;
                 }
 
-                const imported = normalizeImportedCategories(parsed);
-                saveCategories(imported);
+                const normalized = normalizeImportedPayload(parsed);
+                saveConfig(normalized.config);
+                saveManualAssignments(normalized.manualAssignments);
+                GM_setValue(STORAGE_KEYS.activeFilter, normalized.activeFilter);
+
                 rebuildUI();
-                alert('Categorie importate con successo.');
+                alert('Import completato.');
             } catch (err) {
                 console.error('Import failed:', err);
-                alert('Errore durante l’importazione del file JSON.');
+                alert('Errore durante l’importazione del JSON.');
             }
         };
 
@@ -413,9 +682,10 @@
         input.click();
     }
 
-    function parseKeywords(text) {
+    function parsePatterns(text) {
         return text
-            .split(',')
+            .split('\n')
+            .flatMap(line => line.split(','))
             .map(s => s.trim())
             .filter(Boolean);
     }
@@ -429,6 +699,13 @@
             .replaceAll("'", '&#039;');
     }
 
+    function makeEditableStateCopy() {
+        const copy = deepClone(state);
+        copy.order = normalizeConfig(copy).order;
+        copy.categories = normalizeConfig(copy).categories;
+        return copy;
+    }
+
     function openCategoryManager() {
         const overlay = document.createElement('div');
         overlay.className = 'nlm-modal-overlay';
@@ -436,23 +713,81 @@
         const modal = document.createElement('div');
         modal.className = 'nlm-modal';
 
-        const editableCategories = JSON.parse(JSON.stringify(categories));
+        let editorState = makeEditableStateCopy();
+        let draggedName = null;
 
-        const render = () => {
-            const rowsHtml = Object.keys(editableCategories).map(categoryName => {
-                const isLocked = categoryName === 'All' || categoryName === 'Other';
-                const keywords = (editableCategories[categoryName] || []).join(', ');
+        function getRowsDataFromDOM() {
+            const rows = Array.from(modal.querySelectorAll('.nlm-category-row'));
+            const order = [];
+            const categories = {};
+
+            rows.forEach(row => {
+                const originalName = row.getAttribute('data-original-name');
+                const nameInput = row.querySelector('.nlm-name');
+                const matcherSelect = row.querySelector('.nlm-matcher');
+                const patternsInput = row.querySelector('.nlm-patterns');
+
+                let finalName = originalName;
+                if (nameInput && !nameInput.disabled) {
+                    finalName = nameInput.value.trim();
+                }
+
+                if (!finalName) return;
+
+                let matcher = matcherSelect ? matcherSelect.value : 'keyword';
+                if (finalName === 'All') matcher = 'keyword';
+
+                categories[finalName] = {
+                    matcher,
+                    patterns: finalName === 'All' ? [] : parsePatterns(patternsInput ? patternsInput.value : '')
+                };
+
+                order.push(finalName);
+            });
+
+            const normalized = normalizeConfig({ order, categories });
+            return normalized;
+        }
+
+        function persistManagerEditsToMemory() {
+            editorState = getRowsDataFromDOM();
+        }
+
+        function closeModal() {
+            overlay.remove();
+        }
+
+        function render() {
+            const rowsHtml = editorState.order.map(categoryName => {
+                const rule = editorState.categories[categoryName] || { matcher: 'keyword', patterns: [] };
+                const isLocked = isSpecialCategory(categoryName);
+                const patternsText = (rule.patterns || []).join('\n');
 
                 return `
-                    <div class="nlm-category-row ${isLocked ? 'locked' : ''}" data-category="${escapeHtml(categoryName)}">
-                        <div>
+                    <div class="nlm-category-row ${isLocked ? 'locked' : ''}" data-original-name="${escapeHtml(categoryName)}" draggable="${isLocked ? 'false' : 'true'}">
+                        <div class="nlm-drag-handle" title="${isLocked ? 'Categoria fissa' : 'Trascina per riordinare'}">${isLocked ? '•' : '☰'}</div>
+
+                        <div class="nlm-field">
+                            <label>Category</label>
                             <input type="text" class="nlm-name" value="${escapeHtml(categoryName)}" ${isLocked ? 'disabled' : ''}>
                             <div class="nlm-note">${isLocked ? 'Categoria speciale protetta' : 'Nome categoria'}</div>
                         </div>
-                        <div>
-                            <textarea class="nlm-keywords" ${categoryName === 'All' ? 'disabled' : ''}>${escapeHtml(keywords)}</textarea>
-                            <div class="nlm-note">${categoryName === 'All' ? 'Non usa keyword' : 'Keyword separate da virgola'}</div>
+
+                        <div class="nlm-field">
+                            <label>Matcher</label>
+                            <select class="nlm-matcher" ${categoryName === 'All' ? 'disabled' : ''}>
+                                <option value="keyword" ${rule.matcher === 'keyword' ? 'selected' : ''}>keyword</option>
+                                <option value="regex" ${rule.matcher === 'regex' ? 'selected' : ''}>regex</option>
+                            </select>
+                            <div class="nlm-note">${categoryName === 'All' ? 'Non usa pattern' : 'Tipo di confronto'}</div>
                         </div>
+
+                        <div class="nlm-field">
+                            <label>Patterns</label>
+                            <textarea class="nlm-patterns" ${categoryName === 'All' ? 'disabled' : ''}>${escapeHtml(patternsText)}</textarea>
+                            <div class="nlm-note">${categoryName === 'All' ? 'Vuota per definizione' : 'Una per riga oppure separate da virgola'}</div>
+                        </div>
+
                         <div>
                             ${isLocked ? '' : '<button class="nlm-btn danger nlm-delete">Delete</button>'}
                         </div>
@@ -462,7 +797,7 @@
 
             modal.innerHTML = `
                 <h2>Manage Categories</h2>
-                <p>Modifica nomi e keyword delle categorie. Le keyword sono confrontate con il titolo del notebook in modo case-insensitive.</p>
+                <p>Puoi riordinare le categorie trascinandole, usare matcher keyword o regex, aggiungere nuove categorie, importare/esportare e salvare tutto senza toccare lo script.</p>
 
                 <div class="nlm-category-list">
                     ${rowsHtml}
@@ -470,126 +805,171 @@
 
                 <div class="nlm-add-row">
                     <input type="text" class="nlm-new-name" placeholder="New category name">
-                    <input type="text" class="nlm-new-keywords" placeholder="keyword1, keyword2, keyword3">
+                    <select class="nlm-new-matcher">
+                        <option value="keyword">keyword</option>
+                        <option value="regex">regex</option>
+                    </select>
+                    <input type="text" class="nlm-new-patterns" placeholder="pattern1, pattern2 oppure regex">
                     <button class="nlm-btn nlm-add">Add</button>
                 </div>
 
                 <div class="nlm-modal-buttons">
                     <button class="nlm-btn" data-action="cancel">Cancel</button>
                     <button class="nlm-btn" data-action="reset">Reset defaults</button>
+                    <button class="nlm-btn" data-action="export">Export</button>
+                    <button class="nlm-btn" data-action="import">Import</button>
                     <button class="nlm-btn primary" data-action="save">Save</button>
                 </div>
             `;
 
             bindModalEvents();
-        };
+        }
 
-        const closeModal = () => overlay.remove();
-
-        const collectFormData = () => {
-            const newCategories = {};
-            const rows = modal.querySelectorAll('.nlm-category-row');
+        function bindDnD() {
+            const rows = Array.from(modal.querySelectorAll('.nlm-category-row'));
 
             rows.forEach(row => {
-                const originalName = row.getAttribute('data-category');
-                const nameInput = row.querySelector('.nlm-name');
-                const keywordsInput = row.querySelector('.nlm-keywords');
-
-                let finalName = originalName;
-                if (nameInput && !nameInput.disabled) {
-                    finalName = nameInput.value.trim();
-                }
-
-                if (!finalName) return;
-
-                if (finalName === 'All') {
-                    newCategories.All = [];
+                if (isSpecialCategory(row.getAttribute('data-original-name'))) {
                     return;
                 }
 
-                const keywords = keywordsInput ? parseKeywords(keywordsInput.value) : [];
+                row.addEventListener('dragstart', () => {
+                    persistManagerEditsToMemory();
+                    draggedName = row.getAttribute('data-original-name');
+                    row.classList.add('dragging');
+                });
 
-                if (finalName === 'Other') {
-                    newCategories.Other = keywords;
-                } else {
-                    newCategories[finalName] = keywords;
-                }
+                row.addEventListener('dragend', () => {
+                    row.classList.remove('dragging');
+                    rows.forEach(r => r.classList.remove('drag-over'));
+                });
+
+                row.addEventListener('dragover', e => {
+                    e.preventDefault();
+                    if (!draggedName) return;
+                    row.classList.add('drag-over');
+                });
+
+                row.addEventListener('dragleave', () => {
+                    row.classList.remove('drag-over');
+                });
+
+                row.addEventListener('drop', e => {
+                    e.preventDefault();
+                    row.classList.remove('drag-over');
+
+                    const targetName = row.getAttribute('data-original-name');
+                    if (!draggedName || !targetName || draggedName === targetName) return;
+                    if (isSpecialCategory(targetName)) return;
+
+                    const current = getRowsDataFromDOM();
+                    const movable = current.order.filter(name => !isSpecialCategory(name));
+
+                    const from = movable.indexOf(draggedName);
+                    const to = movable.indexOf(targetName);
+                    if (from < 0 || to < 0) return;
+
+                    const reorderedMovable = [...movable];
+                    const [item] = reorderedMovable.splice(from, 1);
+                    reorderedMovable.splice(to, 0, item);
+
+                    current.order = ['All', ...reorderedMovable, 'Other'];
+                    editorState = normalizeConfig(current);
+                    render();
+                });
             });
+        }
 
-            if (!newCategories.All) newCategories.All = [];
-            if (!newCategories.Other) newCategories.Other = [];
-            return normalizeImportedCategories(newCategories);
-        };
+        function bindModalEvents() {
+            bindDnD();
 
-        const bindModalEvents = () => {
             modal.querySelectorAll('.nlm-delete').forEach(btn => {
-                btn.addEventListener('click', (e) => {
+                btn.addEventListener('click', e => {
                     const row = e.target.closest('.nlm-category-row');
-                    if (row) row.remove();
+                    if (!row) return;
+                    row.remove();
                 });
             });
 
             const addBtn = modal.querySelector('.nlm-add');
-            if (addBtn) {
-                addBtn.addEventListener('click', () => {
-                    const nameInput = modal.querySelector('.nlm-new-name');
-                    const keywordsInput = modal.querySelector('.nlm-new-keywords');
+            addBtn.addEventListener('click', () => {
+                persistManagerEditsToMemory();
 
-                    const name = nameInput.value.trim();
-                    if (!name) {
-                        alert('Inserisci un nome categoria.');
-                        return;
-                    }
+                const nameInput = modal.querySelector('.nlm-new-name');
+                const matcherSelect = modal.querySelector('.nlm-new-matcher');
+                const patternsInput = modal.querySelector('.nlm-new-patterns');
 
-                    if (name === 'All' || name === 'Other') {
-                        alert('Questo nome è riservato.');
-                        return;
-                    }
+                const name = nameInput.value.trim();
+                if (!name) {
+                    alert('Inserisci un nome categoria.');
+                    return;
+                }
 
-                    const existingNames = Array.from(modal.querySelectorAll('.nlm-category-row .nlm-name'))
-                        .map(input => input.value.trim().toLowerCase());
+                if (isSpecialCategory(name)) {
+                    alert('Nome riservato.');
+                    return;
+                }
 
-                    if (existingNames.includes(name.toLowerCase())) {
-                        alert('Esiste già una categoria con questo nome.');
-                        return;
-                    }
+                const existing = new Set(editorState.order.map(n => n.toLowerCase()));
+                if (existing.has(name.toLowerCase())) {
+                    alert('Esiste già una categoria con questo nome.');
+                    return;
+                }
 
-                    editableCategories[name] = parseKeywords(keywordsInput.value);
-                    render();
-                });
-            }
+                editorState.categories[name] = {
+                    matcher: matcherSelect.value === 'regex' ? 'regex' : 'keyword',
+                    patterns: parsePatterns(patternsInput.value)
+                };
+
+                editorState.order = ['All', ...editorState.order.filter(n => n !== 'All' && n !== 'Other'), name, 'Other'];
+                render();
+            });
 
             modal.querySelector('[data-action="cancel"]').addEventListener('click', closeModal);
 
             modal.querySelector('[data-action="reset"]').addEventListener('click', () => {
                 if (!confirm('Ripristinare le categorie di default?')) return;
-                Object.keys(editableCategories).forEach(k => delete editableCategories[k]);
-                Object.assign(editableCategories, JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)));
+                editorState = createDefaultState();
                 render();
             });
 
-            modal.querySelector('[data-action="save"]').addEventListener('click', () => {
-                const newCategories = collectFormData();
+            modal.querySelector('[data-action="export"]').addEventListener('click', async () => {
+                persistManagerEditsToMemory();
+                const oldState = state;
+                const tempState = normalizeConfig(editorState);
+                state = tempState;
+                await exportCategories();
+                state = oldState;
+            });
 
-                const names = Object.keys(newCategories);
+            modal.querySelector('[data-action="import"]').addEventListener('click', () => {
+                closeModal();
+                triggerImport();
+            });
+
+            modal.querySelector('[data-action="save"]').addEventListener('click', () => {
+                const nextState = getRowsDataFromDOM();
+
                 const lowered = new Set();
-                for (const name of names) {
-                    const lower = name.toLowerCase();
-                    if (lowered.has(lower)) {
+                for (const name of nextState.order) {
+                    const k = name.toLowerCase();
+                    if (lowered.has(k)) {
                         alert(`Nome categoria duplicato: ${name}`);
                         return;
                     }
-                    lowered.add(lower);
+                    lowered.add(k);
                 }
 
-                saveCategories(newCategories);
+                saveConfig(nextState);
                 rebuildUI();
                 closeModal();
             });
-        };
+        }
 
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) closeModal();
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) {
+                closeModal();
+            }
         });
 
         render();
@@ -597,20 +977,110 @@
         document.body.appendChild(overlay);
     }
 
+    function ensureManualTools(projectElement) {
+        if (projectElement.querySelector('.nlm-project-tools')) {
+            return;
+        }
+
+        const titleElement = getTitleElement(projectElement);
+        if (!titleElement) return;
+
+        const projectKey = getProjectKey(projectElement);
+        if (!projectKey) return;
+
+        const container = document.createElement('div');
+        container.className = 'nlm-project-tools';
+
+        const badge = document.createElement('span');
+        badge.className = 'nlm-pill';
+        badge.textContent = 'Category';
+
+        const select = document.createElement('select');
+        select.className = 'nlm-manual-select';
+
+        const autoOption = document.createElement('option');
+        autoOption.value = '';
+        autoOption.textContent = 'Auto';
+        select.appendChild(autoOption);
+
+        getCategoryNames()
+            .filter(name => name !== 'All')
+            .forEach(name => {
+                const option = document.createElement('option');
+                option.value = name;
+                option.textContent = name;
+                select.appendChild(option);
+            });
+
+        select.value = manualAssignments[projectKey] || '';
+
+        const clearBtn = document.createElement('button');
+        clearBtn.className = 'nlm-mini-btn';
+        clearBtn.textContent = 'Clear';
+
+        select.addEventListener('change', () => {
+            if (select.value) {
+                manualAssignments[projectKey] = select.value;
+            } else {
+                delete manualAssignments[projectKey];
+            }
+            saveManualAssignments(manualAssignments);
+            updateProjectToolLabel(projectElement);
+            updateButtonCounts();
+            filterProjects(getSavedFilter());
+        });
+
+        clearBtn.addEventListener('click', e => {
+            e.preventDefault();
+            delete manualAssignments[projectKey];
+            saveManualAssignments(manualAssignments);
+            select.value = '';
+            updateProjectToolLabel(projectElement);
+            updateButtonCounts();
+            filterProjects(getSavedFilter());
+        });
+
+        container.appendChild(badge);
+        container.appendChild(select);
+        container.appendChild(clearBtn);
+
+        titleElement.insertAdjacentElement('afterend', container);
+        updateProjectToolLabel(projectElement);
+    }
+
+    function updateProjectToolLabel(projectElement) {
+        const tools = projectElement.querySelector('.nlm-project-tools');
+        if (!tools) return;
+
+        const badge = tools.querySelector('.nlm-pill');
+        const projectKey = getProjectKey(projectElement);
+        const effectiveCategory = getProjectCategory(projectElement);
+
+        if (projectKey && manualAssignments[projectKey]) {
+            badge.textContent = `Manual: ${effectiveCategory}`;
+        } else {
+            badge.textContent = `Auto: ${effectiveCategory}`;
+        }
+    }
+
+    function decorateProjects() {
+        getProjectElements().forEach(projectElement => {
+            ensureManualTools(projectElement);
+            updateProjectToolLabel(projectElement);
+        });
+    }
+
     function createFilterUI(targetContainer) {
         if (document.querySelector('.category-filter-container')) {
             updateButtonCounts();
-
-            const lastFilter = GM_getValue(ACTIVE_FILTER_KEY, 'All');
-            const safeFilter = categories[lastFilter] !== undefined ? lastFilter : 'All';
-            filterProjects(safeFilter);
+            filterProjects(getSavedFilter());
             return;
         }
 
         const filterContainer = document.createElement('div');
         filterContainer.className = 'category-filter-container';
 
-        Object.keys(categories).forEach(categoryName => {
+        getCategoryNames().forEach(categoryName => {
             const button = document.createElement('button');
             button.className = 'category-filter-button';
             button.setAttribute('data-category', categoryName);
@@ -633,29 +1103,37 @@
         const exportButton = document.createElement('button');
         exportButton.className = 'category-action-button';
         exportButton.textContent = 'Export';
-        exportButton.title = 'Esporta le categorie in un file JSON';
-        exportButton.addEventListener('click', exportCategories);
+        exportButton.title = 'Esporta configurazione, filtro attivo e assegnazioni manuali';
+        exportButton.addEventListener('click', () => { exportCategories(); });
         filterContainer.appendChild(exportButton);
 
         const importButton = document.createElement('button');
         importButton.className = 'category-action-button';
         importButton.textContent = 'Import';
-        importButton.title = 'Importa le categorie da un file JSON';
+        importButton.title = 'Importa configurazione, filtro attivo e assegnazioni manuali';
         importButton.addEventListener('click', triggerImport);
         filterContainer.appendChild(importButton);
 
         targetContainer.parentNode.insertBefore(filterContainer, targetContainer);
 
         updateButtonCounts();
-
-        const lastFilter = GM_getValue(ACTIVE_FILTER_KEY, 'All');
-        const safeFilter = categories[lastFilter] !== undefined ? lastFilter : 'All';
-        filterProjects(safeFilter);
+        filterProjects(getSavedFilter());
     }
 
-    document.arrive('.project-buttons-flow, table.mdc-data-table__table', { existing: true }, function(element) {
+    function refreshAll() {
+        decorateProjects();
+        updateButtonCounts();
+        filterProjects(getSavedFilter());
+    }
+
+    document.arrive('.project-buttons-flow, table.mdc-data-table__table', { existing: true }, element => {
         createFilterUI(element);
+        refreshAll();
     });
 
-    GM_log('NotebookLM Categorizer Script Loaded (SPA-Aware + Import/Export + Manager)');
+    document.arrive('project-button, tr.mat-mdc-row', { existing: true }, () => {
+        refreshAll();
+    });
+
+    GM_log('NotebookLM Categorizer Pro loaded');
 })();
