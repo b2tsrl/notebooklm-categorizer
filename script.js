@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NotebookLM Project Categorizer Pro
 // @namespace    https://github.com/muharamdani
-// @version      2.1.0
-// @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, configurable control layout, and protected controls that do not open the notebook when clicked.
+// @version      2.2.0
+// @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, configurable control layout and visibility, and protected controls that do not open the notebook when clicked.
 // @author       muharamdani + ChatGPT
 // @match        https://notebooklm.google.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.co
@@ -27,14 +27,15 @@
     };
 
     const DEFAULT_PREFERENCES = {
-        controlLayout: 'right' // 'right' | 'below'
+        controlLayout: 'right',      // right | below
+        controlVisibility: 'always'  // always | hover
     };
 
     const STORAGE_KEYS = {
         activeFilter: 'notebooklm_active_filter',
         config: 'notebooklm_category_config_v2',
         manualAssignments: 'notebooklm_manual_category_assignments_v1',
-        preferences: 'notebooklm_preferences_v1',
+        preferences: 'notebooklm_preferences_v2',
         exportBundleName: 'notebooklm-categories-export'
     };
 
@@ -240,7 +241,7 @@
             grid-template-columns: 220px 260px 1fr;
             gap: 10px;
             align-items: center;
-            margin: 0 0 18px 0;
+            margin: 0 0 12px 0;
             padding: 12px;
             border: 1px solid #eee;
             border-radius: 12px;
@@ -260,6 +261,7 @@
             flex-wrap: wrap;
             position: relative;
             z-index: 5;
+            transition: opacity 0.15s ease, visibility 0.15s ease;
         }
 
         .nlm-project-tools.layout-below {
@@ -269,6 +271,23 @@
         .nlm-project-tools.layout-right {
             margin-left: auto;
             justify-content: flex-end;
+        }
+
+        .nlm-project-tools.visibility-hover {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        project-button:hover .nlm-project-tools.visibility-hover,
+        tr.mat-mdc-row:hover .nlm-project-tools.visibility-hover,
+        project-button:focus-within .nlm-project-tools.visibility-hover,
+        tr.mat-mdc-row:focus-within .nlm-project-tools.visibility-hover,
+        .nlm-project-tools.visibility-hover:hover,
+        .nlm-project-tools.visibility-hover:focus-within {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
         }
 
         .nlm-manual-select {
@@ -386,6 +405,10 @@
             prefs.controlLayout = DEFAULT_PREFERENCES.controlLayout;
         }
 
+        if (!['always', 'hover'].includes(prefs.controlVisibility)) {
+            prefs.controlVisibility = DEFAULT_PREFERENCES.controlVisibility;
+        }
+
         return prefs;
     }
 
@@ -475,9 +498,7 @@
         const key = getProjectKey(projectElement);
         const title = getProjectTitle(projectElement);
 
-        if (!title) {
-            return 'Other';
-        }
+        if (!title) return 'Other';
 
         if (key && manualAssignments[key] && state.categories[manualAssignments[key]]) {
             return manualAssignments[key];
@@ -572,7 +593,7 @@
 
     function exportPayload() {
         return {
-            version: 3,
+            version: 4,
             exportedAt: new Date().toISOString(),
             activeFilter: getSavedFilter(),
             config: state,
@@ -668,14 +689,10 @@
             const filename = `${STORAGE_KEYS.exportBundleName}-${new Date().toISOString().slice(0, 10)}.json`;
 
             const pickerResult = await saveTextFileWithPicker(filename, content);
-            if (pickerResult === true || pickerResult === 'cancelled') {
-                return;
-            }
+            if (pickerResult === true || pickerResult === 'cancelled') return;
 
             const gmResult = await gmDownloadWithSaveAs(filename, content);
-            if (gmResult) {
-                return;
-            }
+            if (gmResult) return;
 
             fallbackDownload(filename, content);
         } catch (err) {
@@ -875,8 +892,11 @@
 
         function getPreferencesFromDOM() {
             const layoutSelect = modal.querySelector('.nlm-pref-layout');
+            const visibilitySelect = modal.querySelector('.nlm-pref-visibility');
+
             return normalizePreferences({
-                controlLayout: layoutSelect ? layoutSelect.value : editorPreferences.controlLayout
+                controlLayout: layoutSelect ? layoutSelect.value : editorPreferences.controlLayout,
+                controlVisibility: visibilitySelect ? visibilitySelect.value : editorPreferences.controlVisibility
             });
         }
 
@@ -929,7 +949,7 @@
 
             modal.innerHTML = `
                 <h2>Manage Categories</h2>
-                <p>Puoi riordinare le categorie trascinandole, usare matcher keyword o regex, aggiungere nuove categorie, importare/esportare e scegliere il layout dei controlli.</p>
+                <p>Puoi riordinare le categorie trascinandole, usare matcher keyword o regex, aggiungere nuove categorie, importare/esportare e scegliere layout e visibilità dei controlli.</p>
 
                 <div class="nlm-pref-row">
                     <div class="nlm-field">
@@ -942,6 +962,19 @@
                         </select>
                     </div>
                     <div class="nlm-note">Determina dove mostrare i controlli di categoria manuale per ogni notebook.</div>
+                </div>
+
+                <div class="nlm-pref-row">
+                    <div class="nlm-field">
+                        <label>Control visibility</label>
+                    </div>
+                    <div>
+                        <select class="nlm-pref-visibility">
+                            <option value="always" ${editorPreferences.controlVisibility === 'always' ? 'selected' : ''}>Always visible</option>
+                            <option value="hover" ${editorPreferences.controlVisibility === 'hover' ? 'selected' : ''}>Show on hover</option>
+                        </select>
+                    </div>
+                    <div class="nlm-note">Con hover i controlli appaiono al passaggio del mouse o quando il notebook riceve focus.</div>
                 </div>
 
                 <div class="nlm-category-list">
@@ -1036,8 +1069,7 @@
                 });
             });
 
-            const addBtn = modal.querySelector('.nlm-add');
-            addBtn.addEventListener('click', () => {
+            modal.querySelector('.nlm-add').addEventListener('click', () => {
                 persistManagerEditsToMemory();
 
                 const nameInput = modal.querySelector('.nlm-new-name');
@@ -1117,46 +1149,12 @@
         }
 
         overlay.addEventListener('click', e => {
-            if (e.target === overlay) {
-                closeModal();
-            }
+            if (e.target === overlay) closeModal();
         });
 
         render();
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
-    }
-
-    function protectInteractiveControl(element) {
-        const stopHard = (e) => {
-            e.stopPropagation();
-            if (typeof e.stopImmediatePropagation === 'function') {
-                e.stopImmediatePropagation();
-            }
-        };
-
-        [
-            'click',
-            'dblclick',
-            'mousedown',
-            'mouseup',
-            'pointerdown',
-            'pointerup',
-            'touchstart',
-            'touchend'
-        ].forEach(eventName => {
-            element.addEventListener(eventName, stopHard, true);
-        });
-
-        element.addEventListener('keydown', (e) => {
-            if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
-                stopHard(e);
-            }
-        }, true);
-
-        element.onclick = (e) => e.stopPropagation();
-        element.onmousedown = (e) => e.stopPropagation();
-        element.onpointerdown = (e) => e.stopPropagation();
     }
 
     function ensureInlineHost(titleElement) {
@@ -1189,7 +1187,7 @@
         if (!projectKey) return;
 
         const container = document.createElement('div');
-        container.className = `nlm-project-tools layout-${preferences.controlLayout}`;
+        container.className = `nlm-project-tools layout-${preferences.controlLayout} visibility-${preferences.controlVisibility}`;
 
         const badge = document.createElement('span');
         badge.className = 'nlm-pill';
