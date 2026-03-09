@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NotebookLM Project Categorizer Pro
 // @namespace    https://github.com/muharamdani
-// @version      2.0.1
-// @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, and export with save picker when available.
+// @version      2.0.2
+// @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, and protected controls that do not open the notebook when clicked.
 // @author       muharamdani + ChatGPT
 // @match        https://notebooklm.google.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.co
@@ -240,6 +240,8 @@
             gap: 6px;
             margin-top: 6px;
             flex-wrap: wrap;
+            position: relative;
+            z-index: 5;
         }
 
         .nlm-manual-select {
@@ -248,12 +250,16 @@
             font-size: 12px;
             min-width: 130px;
             background: #fff;
+            position: relative;
+            z-index: 6;
         }
 
         .nlm-mini-btn {
             padding: 4px 8px;
             font-size: 12px;
             border-radius: 10px;
+            position: relative;
+            z-index: 6;
         }
 
         .nlm-pill {
@@ -266,6 +272,8 @@
             background: #eef4ff;
             color: #2457b2;
             border: 1px solid #cfe0ff;
+            position: relative;
+            z-index: 6;
         }
     `);
 
@@ -304,7 +312,6 @@
             : raw;
 
         const names = new Set(Object.keys(rawCategories));
-
         names.add('All');
         names.add('Other');
 
@@ -430,6 +437,7 @@
     function updateButtonCounts() {
         const projectButtons = getProjectElements();
         const categoryCounts = {};
+
         for (const name of getCategoryNames()) {
             categoryCounts[name] = 0;
         }
@@ -452,6 +460,7 @@
 
     function filterProjects(selectedCategory) {
         const safeCategory = state.categories[selectedCategory] ? selectedCategory : 'All';
+
         getProjectElements().forEach(proj => {
             const projectCategory = getProjectCategory(proj);
             if (safeCategory === 'All' || projectCategory === safeCategory) {
@@ -605,11 +614,11 @@
 
         const config = obj.config || obj;
         const categories = config.categories || config;
-
         if (!categories || typeof categories !== 'object' || Array.isArray(categories)) return false;
 
         for (const [key, rule] of Object.entries(categories)) {
             if (typeof key !== 'string') return false;
+
             if (rule && typeof rule === 'object' && !Array.isArray(rule)) {
                 if (rule.matcher !== undefined && !['keyword', 'regex'].includes(rule.matcher)) return false;
                 if (rule.patterns !== undefined && !Array.isArray(rule.patterns)) return false;
@@ -706,6 +715,38 @@
         return copy;
     }
 
+    function protectInteractiveControl(element) {
+        const stopHard = (e) => {
+            e.stopPropagation();
+            if (typeof e.stopImmediatePropagation === 'function') {
+                e.stopImmediatePropagation();
+            }
+        };
+
+        [
+            'click',
+            'dblclick',
+            'mousedown',
+            'mouseup',
+            'pointerdown',
+            'pointerup',
+            'touchstart',
+            'touchend'
+        ].forEach(eventName => {
+            element.addEventListener(eventName, stopHard, true);
+        });
+
+        element.addEventListener('keydown', (e) => {
+            if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
+                stopHard(e);
+            }
+        }, true);
+
+        element.onclick = (e) => e.stopPropagation();
+        element.onmousedown = (e) => e.stopPropagation();
+        element.onpointerdown = (e) => e.stopPropagation();
+    }
+
     function openCategoryManager() {
         const overlay = document.createElement('div');
         overlay.className = 'nlm-modal-overlay';
@@ -745,8 +786,7 @@
                 order.push(finalName);
             });
 
-            const normalized = normalizeConfig({ order, categories });
-            return normalized;
+            return normalizeConfig({ order, categories });
         }
 
         function persistManagerEditsToMemory() {
@@ -789,7 +829,7 @@
                         </div>
 
                         <div>
-                            ${isLocked ? '' : '<button class="nlm-btn danger nlm-delete">Delete</button>'}
+                            ${isLocked ? '' : '<button class="nlm-btn danger nlm-delete" type="button">Delete</button>'}
                         </div>
                     </div>
                 `;
@@ -810,15 +850,15 @@
                         <option value="regex">regex</option>
                     </select>
                     <input type="text" class="nlm-new-patterns" placeholder="pattern1, pattern2 oppure regex">
-                    <button class="nlm-btn nlm-add">Add</button>
+                    <button class="nlm-btn nlm-add" type="button">Add</button>
                 </div>
 
                 <div class="nlm-modal-buttons">
-                    <button class="nlm-btn" data-action="cancel">Cancel</button>
-                    <button class="nlm-btn" data-action="reset">Reset defaults</button>
-                    <button class="nlm-btn" data-action="export">Export</button>
-                    <button class="nlm-btn" data-action="import">Import</button>
-                    <button class="nlm-btn primary" data-action="save">Save</button>
+                    <button class="nlm-btn" data-action="cancel" type="button">Cancel</button>
+                    <button class="nlm-btn" data-action="reset" type="button">Reset defaults</button>
+                    <button class="nlm-btn" data-action="export" type="button">Export</button>
+                    <button class="nlm-btn" data-action="import" type="button">Import</button>
+                    <button class="nlm-btn primary" data-action="save" type="button">Save</button>
                 </div>
             `;
 
@@ -994,6 +1034,7 @@
         const badge = document.createElement('span');
         badge.className = 'nlm-pill';
         badge.textContent = 'Category';
+        badge.tabIndex = 0;
 
         const select = document.createElement('select');
         select.className = 'nlm-manual-select';
@@ -1017,28 +1058,42 @@
         const clearBtn = document.createElement('button');
         clearBtn.className = 'nlm-mini-btn';
         clearBtn.textContent = 'Clear';
+        clearBtn.type = 'button';
 
-        select.addEventListener('change', () => {
+        [container, badge, select, clearBtn].forEach(protectInteractiveControl);
+
+        const stopHard = (e) => {
+            e.stopPropagation();
+            if (typeof e.stopImmediatePropagation === 'function') {
+                e.stopImmediatePropagation();
+            }
+        };
+
+        select.addEventListener('change', (e) => {
+            stopHard(e);
+
             if (select.value) {
                 manualAssignments[projectKey] = select.value;
             } else {
                 delete manualAssignments[projectKey];
             }
+
             saveManualAssignments(manualAssignments);
             updateProjectToolLabel(projectElement);
             updateButtonCounts();
             filterProjects(getSavedFilter());
-        });
+        }, true);
 
-        clearBtn.addEventListener('click', e => {
-            e.preventDefault();
+        clearBtn.addEventListener('click', (e) => {
+            stopHard(e);
+
             delete manualAssignments[projectKey];
             saveManualAssignments(manualAssignments);
             select.value = '';
             updateProjectToolLabel(projectElement);
             updateButtonCounts();
             filterProjects(getSavedFilter());
-        });
+        }, true);
 
         container.appendChild(badge);
         container.appendChild(select);
@@ -1097,6 +1152,7 @@
         manageButton.className = 'category-action-button';
         manageButton.textContent = 'Manage';
         manageButton.title = 'Gestisci categorie';
+        manageButton.type = 'button';
         manageButton.addEventListener('click', openCategoryManager);
         filterContainer.appendChild(manageButton);
 
@@ -1104,6 +1160,7 @@
         exportButton.className = 'category-action-button';
         exportButton.textContent = 'Export';
         exportButton.title = 'Esporta configurazione, filtro attivo e assegnazioni manuali';
+        exportButton.type = 'button';
         exportButton.addEventListener('click', () => { exportCategories(); });
         filterContainer.appendChild(exportButton);
 
@@ -1111,6 +1168,7 @@
         importButton.className = 'category-action-button';
         importButton.textContent = 'Import';
         importButton.title = 'Importa configurazione, filtro attivo e assegnazioni manuali';
+        importButton.type = 'button';
         importButton.addEventListener('click', triggerImport);
         filterContainer.appendChild(importButton);
 
