@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NotebookLM Project Categorizer Pro
 // @namespace    https://github.com/muharamdani
-// @version      2.0.2
-// @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, and protected controls that do not open the notebook when clicked.
+// @version      2.1.0
+// @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, configurable control layout, and protected controls that do not open the notebook when clicked.
 // @author       muharamdani + ChatGPT
 // @match        https://notebooklm.google.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.co
@@ -26,10 +26,15 @@
         Other: { matcher: 'keyword', patterns: [] }
     };
 
+    const DEFAULT_PREFERENCES = {
+        controlLayout: 'right' // 'right' | 'below'
+    };
+
     const STORAGE_KEYS = {
         activeFilter: 'notebooklm_active_filter',
         config: 'notebooklm_category_config_v2',
         manualAssignments: 'notebooklm_manual_category_assignments_v1',
+        preferences: 'notebooklm_preferences_v1',
         exportBundleName: 'notebooklm-categories-export'
     };
 
@@ -37,6 +42,7 @@
 
     let state = loadConfig();
     let manualAssignments = loadManualAssignments();
+    let preferences = loadPreferences();
 
     GM_addStyle(`
         .category-filter-container {
@@ -175,7 +181,8 @@
         .nlm-category-row select,
         .nlm-category-row textarea,
         .nlm-add-row input[type="text"],
-        .nlm-add-row select {
+        .nlm-add-row select,
+        .nlm-pref-row select {
             width: 100%;
             box-sizing: border-box;
             border: 1px solid #ccc;
@@ -228,6 +235,18 @@
             border-top: 2px solid #eee;
         }
 
+        .nlm-pref-row {
+            display: grid;
+            grid-template-columns: 220px 260px 1fr;
+            gap: 10px;
+            align-items: center;
+            margin: 0 0 18px 0;
+            padding: 12px;
+            border: 1px solid #eee;
+            border-radius: 12px;
+            background: #fafafa;
+        }
+
         .nlm-note {
             font-size: 12px;
             color: #666;
@@ -238,10 +257,18 @@
             display: flex;
             align-items: center;
             gap: 6px;
-            margin-top: 6px;
             flex-wrap: wrap;
             position: relative;
             z-index: 5;
+        }
+
+        .nlm-project-tools.layout-below {
+            margin-top: 6px;
+        }
+
+        .nlm-project-tools.layout-right {
+            margin-left: auto;
+            justify-content: flex-end;
         }
 
         .nlm-manual-select {
@@ -275,17 +302,30 @@
             position: relative;
             z-index: 6;
         }
+
+        .nlm-inline-host {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+        }
+
+        .nlm-inline-host .project-button-title,
+        .nlm-inline-host .project-table-title {
+            min-width: 0;
+            flex: 1 1 auto;
+        }
     `);
+
+    function deepClone(obj) {
+        return JSON.parse(JSON.stringify(obj));
+    }
 
     function createDefaultState() {
         return {
             order: [...DEFAULT_CATEGORY_ORDER],
             categories: deepClone(DEFAULT_CATEGORY_RULES)
         };
-    }
-
-    function deepClone(obj) {
-        return JSON.parse(JSON.stringify(obj));
     }
 
     function normalizeCategoryRule(name, rule) {
@@ -336,6 +376,19 @@
         return { order, categories };
     }
 
+    function normalizePreferences(raw) {
+        const prefs = {
+            ...DEFAULT_PREFERENCES,
+            ...(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {})
+        };
+
+        if (!['right', 'below'].includes(prefs.controlLayout)) {
+            prefs.controlLayout = DEFAULT_PREFERENCES.controlLayout;
+        }
+
+        return prefs;
+    }
+
     function loadConfig() {
         const saved = GM_getValue(STORAGE_KEYS.config, null);
         return normalizeConfig(saved);
@@ -359,6 +412,16 @@
         manualAssignments = nextAssignments && typeof nextAssignments === 'object' ? nextAssignments : {};
         GM_setValue(STORAGE_KEYS.manualAssignments, manualAssignments);
         GM_log('Saved manual assignments:', manualAssignments);
+    }
+
+    function loadPreferences() {
+        return normalizePreferences(GM_getValue(STORAGE_KEYS.preferences, null));
+    }
+
+    function savePreferences(nextPreferences) {
+        preferences = normalizePreferences(nextPreferences);
+        GM_setValue(STORAGE_KEYS.preferences, preferences);
+        GM_log('Saved preferences:', preferences);
     }
 
     function getCategoryNames() {
@@ -486,6 +549,17 @@
         const existing = document.querySelector('.category-filter-container');
         if (existing) existing.remove();
 
+        document.querySelectorAll('.nlm-project-tools').forEach(el => el.remove());
+        document.querySelectorAll('.nlm-inline-host').forEach(host => {
+            if (host.dataset.nlmGenerated === '1') {
+                const title = host.querySelector('.project-button-title, .project-table-title');
+                if (title && host.parentNode) {
+                    host.parentNode.insertBefore(title, host);
+                }
+                host.remove();
+            }
+        });
+
         const targetContainer = document.querySelector('.project-buttons-flow, table.mdc-data-table__table');
         if (targetContainer) {
             createFilterUI(targetContainer);
@@ -498,11 +572,12 @@
 
     function exportPayload() {
         return {
-            version: 2,
+            version: 3,
             exportedAt: new Date().toISOString(),
             activeFilter: getSavedFilter(),
             config: state,
-            manualAssignments
+            manualAssignments,
+            preferences
         };
     }
 
@@ -642,7 +717,14 @@
             ? obj.manualAssignments
             : {};
 
-        return { config, activeFilter, manualAssignments: assignments };
+        const importedPreferences = normalizePreferences(obj.preferences || null);
+
+        return {
+            config,
+            activeFilter,
+            manualAssignments: assignments,
+            preferences: importedPreferences
+        };
     }
 
     function importCategoriesFromFile(file) {
@@ -660,6 +742,7 @@
                 const normalized = normalizeImportedPayload(parsed);
                 saveConfig(normalized.config);
                 saveManualAssignments(normalized.manualAssignments);
+                savePreferences(normalized.preferences);
                 GM_setValue(STORAGE_KEYS.activeFilter, normalized.activeFilter);
 
                 rebuildUI();
@@ -755,6 +838,7 @@
         modal.className = 'nlm-modal';
 
         let editorState = makeEditableStateCopy();
+        let editorPreferences = deepClone(preferences);
         let draggedName = null;
 
         function getRowsDataFromDOM() {
@@ -789,8 +873,16 @@
             return normalizeConfig({ order, categories });
         }
 
+        function getPreferencesFromDOM() {
+            const layoutSelect = modal.querySelector('.nlm-pref-layout');
+            return normalizePreferences({
+                controlLayout: layoutSelect ? layoutSelect.value : editorPreferences.controlLayout
+            });
+        }
+
         function persistManagerEditsToMemory() {
             editorState = getRowsDataFromDOM();
+            editorPreferences = getPreferencesFromDOM();
         }
 
         function closeModal() {
@@ -837,7 +929,20 @@
 
             modal.innerHTML = `
                 <h2>Manage Categories</h2>
-                <p>Puoi riordinare le categorie trascinandole, usare matcher keyword o regex, aggiungere nuove categorie, importare/esportare e salvare tutto senza toccare lo script.</p>
+                <p>Puoi riordinare le categorie trascinandole, usare matcher keyword o regex, aggiungere nuove categorie, importare/esportare e scegliere il layout dei controlli.</p>
+
+                <div class="nlm-pref-row">
+                    <div class="nlm-field">
+                        <label>Control layout</label>
+                    </div>
+                    <div>
+                        <select class="nlm-pref-layout">
+                            <option value="right" ${editorPreferences.controlLayout === 'right' ? 'selected' : ''}>Inline right</option>
+                            <option value="below" ${editorPreferences.controlLayout === 'below' ? 'selected' : ''}>Below title</option>
+                        </select>
+                    </div>
+                    <div class="nlm-note">Determina dove mostrare i controlli di categoria manuale per ogni notebook.</div>
+                </div>
 
                 <div class="nlm-category-list">
                     ${rowsHtml}
@@ -970,16 +1075,19 @@
             modal.querySelector('[data-action="reset"]').addEventListener('click', () => {
                 if (!confirm('Ripristinare le categorie di default?')) return;
                 editorState = createDefaultState();
+                editorPreferences = deepClone(DEFAULT_PREFERENCES);
                 render();
             });
 
             modal.querySelector('[data-action="export"]').addEventListener('click', async () => {
                 persistManagerEditsToMemory();
                 const oldState = state;
-                const tempState = normalizeConfig(editorState);
-                state = tempState;
+                const oldPreferences = preferences;
+                state = normalizeConfig(editorState);
+                preferences = normalizePreferences(editorPreferences);
                 await exportCategories();
                 state = oldState;
+                preferences = oldPreferences;
             });
 
             modal.querySelector('[data-action="import"]').addEventListener('click', () => {
@@ -989,6 +1097,7 @@
 
             modal.querySelector('[data-action="save"]').addEventListener('click', () => {
                 const nextState = getRowsDataFromDOM();
+                const nextPreferences = getPreferencesFromDOM();
 
                 const lowered = new Set();
                 for (const name of nextState.order) {
@@ -1001,6 +1110,7 @@
                 }
 
                 saveConfig(nextState);
+                savePreferences(nextPreferences);
                 rebuildUI();
                 closeModal();
             });
@@ -1017,6 +1127,56 @@
         document.body.appendChild(overlay);
     }
 
+    function protectInteractiveControl(element) {
+        const stopHard = (e) => {
+            e.stopPropagation();
+            if (typeof e.stopImmediatePropagation === 'function') {
+                e.stopImmediatePropagation();
+            }
+        };
+
+        [
+            'click',
+            'dblclick',
+            'mousedown',
+            'mouseup',
+            'pointerdown',
+            'pointerup',
+            'touchstart',
+            'touchend'
+        ].forEach(eventName => {
+            element.addEventListener(eventName, stopHard, true);
+        });
+
+        element.addEventListener('keydown', (e) => {
+            if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
+                stopHard(e);
+            }
+        }, true);
+
+        element.onclick = (e) => e.stopPropagation();
+        element.onmousedown = (e) => e.stopPropagation();
+        element.onpointerdown = (e) => e.stopPropagation();
+    }
+
+    function ensureInlineHost(titleElement) {
+        const parent = titleElement.parentElement;
+        if (!parent) return null;
+
+        if (parent.classList.contains('nlm-inline-host')) {
+            return parent;
+        }
+
+        const host = document.createElement('div');
+        host.className = 'nlm-inline-host';
+        host.dataset.nlmGenerated = '1';
+
+        parent.insertBefore(host, titleElement);
+        host.appendChild(titleElement);
+
+        return host;
+    }
+
     function ensureManualTools(projectElement) {
         if (projectElement.querySelector('.nlm-project-tools')) {
             return;
@@ -1029,7 +1189,7 @@
         if (!projectKey) return;
 
         const container = document.createElement('div');
-        container.className = 'nlm-project-tools';
+        container.className = `nlm-project-tools layout-${preferences.controlLayout}`;
 
         const badge = document.createElement('span');
         badge.className = 'nlm-pill';
@@ -1099,7 +1259,17 @@
         container.appendChild(select);
         container.appendChild(clearBtn);
 
-        titleElement.insertAdjacentElement('afterend', container);
+        if (preferences.controlLayout === 'right') {
+            const host = ensureInlineHost(titleElement);
+            if (host) {
+                host.appendChild(container);
+            } else {
+                titleElement.insertAdjacentElement('afterend', container);
+            }
+        } else {
+            titleElement.insertAdjacentElement('afterend', container);
+        }
+
         updateProjectToolLabel(projectElement);
     }
 
@@ -1155,22 +1325,6 @@
         manageButton.type = 'button';
         manageButton.addEventListener('click', openCategoryManager);
         filterContainer.appendChild(manageButton);
-
-        const exportButton = document.createElement('button');
-        exportButton.className = 'category-action-button';
-        exportButton.textContent = 'Export';
-        exportButton.title = 'Esporta configurazione, filtro attivo e assegnazioni manuali';
-        exportButton.type = 'button';
-        exportButton.addEventListener('click', () => { exportCategories(); });
-        filterContainer.appendChild(exportButton);
-
-        const importButton = document.createElement('button');
-        importButton.className = 'category-action-button';
-        importButton.textContent = 'Import';
-        importButton.title = 'Importa configurazione, filtro attivo e assegnazioni manuali';
-        importButton.type = 'button';
-        importButton.addEventListener('click', triggerImport);
-        filterContainer.appendChild(importButton);
 
         targetContainer.parentNode.insertBefore(filterContainer, targetContainer);
 
