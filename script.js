@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         NotebookLM Project Categorizer Pro
 // @namespace    https://github.com/muharamdani
-// @version      2.2.0
+// @version      2.3.0
 // @description  Adds category filters to NotebookLM projects with import/export, inline manager, drag & drop ordering, regex support, manual category assignment, configurable control layout and visibility, and protected controls that do not open the notebook when clicked.
-// @author       muharamdani + ChatGPT
+// @author       muharamdani + B2T S.r.l. + ChatGPT
 // @match        https://notebooklm.google.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.co
 // @grant        GM_addStyle
@@ -113,13 +113,21 @@
         .nlm-modal {
             width: min(1100px, 96vw);
             max-height: 90vh;
-            overflow: auto;
             background: #fff;
             border-radius: 16px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
             padding: 20px;
             font-family: Arial, sans-serif;
             color: #222;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .nlm-modal-scrollable {
+            flex: 1 1 auto;
+            overflow-y: auto;
+            min-height: 0;
         }
 
         .nlm-modal h2 {
@@ -211,6 +219,9 @@
             gap: 10px;
             flex-wrap: wrap;
             margin-top: 18px;
+            flex-shrink: 0;
+            padding-top: 14px;
+            border-top: 1px solid #eee;
         }
 
         .nlm-btn.primary {
@@ -581,9 +592,15 @@
             }
         });
 
-        const targetContainer = document.querySelector('.project-buttons-flow, table.mdc-data-table__table');
+        const targetContainer = document.querySelector('.project-buttons-flow, table.mdc-data-table__table, .project-cards-container');
         if (targetContainer) {
             createFilterUI(targetContainer);
+        } else {
+            // Fallback: find the parent of the first project element
+            const firstProject = document.querySelector('project-button, tr.mat-mdc-row');
+            if (firstProject && firstProject.parentElement) {
+                createFilterUI(firstProject.parentElement);
+            }
         }
 
         decorateProjects();
@@ -951,44 +968,46 @@
                 <h2>Manage Categories</h2>
                 <p>Puoi riordinare le categorie trascinandole, usare matcher keyword o regex, aggiungere nuove categorie, importare/esportare e scegliere layout e visibilità dei controlli.</p>
 
-                <div class="nlm-pref-row">
-                    <div class="nlm-field">
-                        <label>Control layout</label>
+                <div class="nlm-modal-scrollable">
+                    <div class="nlm-pref-row">
+                        <div class="nlm-field">
+                            <label>Control layout</label>
+                        </div>
+                        <div>
+                            <select class="nlm-pref-layout">
+                                <option value="right" ${editorPreferences.controlLayout === 'right' ? 'selected' : ''}>Inline right</option>
+                                <option value="below" ${editorPreferences.controlLayout === 'below' ? 'selected' : ''}>Below title</option>
+                            </select>
+                        </div>
+                        <div class="nlm-note">Determina dove mostrare i controlli di categoria manuale per ogni notebook.</div>
                     </div>
-                    <div>
-                        <select class="nlm-pref-layout">
-                            <option value="right" ${editorPreferences.controlLayout === 'right' ? 'selected' : ''}>Inline right</option>
-                            <option value="below" ${editorPreferences.controlLayout === 'below' ? 'selected' : ''}>Below title</option>
+
+                    <div class="nlm-pref-row">
+                        <div class="nlm-field">
+                            <label>Control visibility</label>
+                        </div>
+                        <div>
+                            <select class="nlm-pref-visibility">
+                                <option value="always" ${editorPreferences.controlVisibility === 'always' ? 'selected' : ''}>Always visible</option>
+                                <option value="hover" ${editorPreferences.controlVisibility === 'hover' ? 'selected' : ''}>Show on hover</option>
+                            </select>
+                        </div>
+                        <div class="nlm-note">Con hover i controlli appaiono al passaggio del mouse o quando il notebook riceve focus.</div>
+                    </div>
+
+                    <div class="nlm-category-list">
+                        ${rowsHtml}
+                    </div>
+
+                    <div class="nlm-add-row">
+                        <input type="text" class="nlm-new-name" placeholder="New category name">
+                        <select class="nlm-new-matcher">
+                            <option value="keyword">keyword</option>
+                            <option value="regex">regex</option>
                         </select>
+                        <input type="text" class="nlm-new-patterns" placeholder="pattern1, pattern2 oppure regex">
+                        <button class="nlm-btn nlm-add" type="button">Add</button>
                     </div>
-                    <div class="nlm-note">Determina dove mostrare i controlli di categoria manuale per ogni notebook.</div>
-                </div>
-
-                <div class="nlm-pref-row">
-                    <div class="nlm-field">
-                        <label>Control visibility</label>
-                    </div>
-                    <div>
-                        <select class="nlm-pref-visibility">
-                            <option value="always" ${editorPreferences.controlVisibility === 'always' ? 'selected' : ''}>Always visible</option>
-                            <option value="hover" ${editorPreferences.controlVisibility === 'hover' ? 'selected' : ''}>Show on hover</option>
-                        </select>
-                    </div>
-                    <div class="nlm-note">Con hover i controlli appaiono al passaggio del mouse o quando il notebook riceve focus.</div>
-                </div>
-
-                <div class="nlm-category-list">
-                    ${rowsHtml}
-                </div>
-
-                <div class="nlm-add-row">
-                    <input type="text" class="nlm-new-name" placeholder="New category name">
-                    <select class="nlm-new-matcher">
-                        <option value="keyword">keyword</option>
-                        <option value="regex">regex</option>
-                    </select>
-                    <input type="text" class="nlm-new-patterns" placeholder="pattern1, pattern2 oppure regex">
-                    <button class="nlm-btn nlm-add" type="button">Add</button>
                 </div>
 
                 <div class="nlm-modal-buttons">
@@ -1060,6 +1079,21 @@
 
         function bindModalEvents() {
             bindDnD();
+
+            // Fix BACK-003: disable draggable on parent row when interacting with
+            // input/textarea/select so the browser can position the cursor normally.
+            modal.querySelectorAll('.nlm-category-row input, .nlm-category-row textarea, .nlm-category-row select').forEach(field => {
+                field.addEventListener('mousedown', () => {
+                    const row = field.closest('.nlm-category-row');
+                    if (row) row.setAttribute('draggable', 'false');
+                });
+                field.addEventListener('blur', () => {
+                    const row = field.closest('.nlm-category-row');
+                    if (row && !isSpecialCategory(row.getAttribute('data-original-name'))) {
+                        row.setAttribute('draggable', 'true');
+                    }
+                });
+            });
 
             modal.querySelectorAll('.nlm-delete').forEach(btn => {
                 btn.addEventListener('click', e => {
@@ -1336,12 +1370,20 @@
         filterProjects(getSavedFilter());
     }
 
-    document.arrive('.project-buttons-flow, table.mdc-data-table__table', { existing: true }, element => {
+    document.arrive('.project-buttons-flow, table.mdc-data-table__table, .project-cards-container', { existing: true }, element => {
         createFilterUI(element);
         refreshAll();
     });
 
-    document.arrive('project-button, tr.mat-mdc-row', { existing: true }, () => {
+    document.arrive('project-button, tr.mat-mdc-row', { existing: true }, (el) => {
+        // If no filter bar exists yet, create it using the parent of this project element
+        if (!document.querySelector('.category-filter-container')) {
+            const container = el.closest('.project-buttons-flow, table.mdc-data-table__table, .project-cards-container')
+                || el.parentElement;
+            if (container) {
+                createFilterUI(container);
+            }
+        }
         refreshAll();
     });
 
